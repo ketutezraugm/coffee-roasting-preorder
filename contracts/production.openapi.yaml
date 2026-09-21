@@ -52,6 +52,25 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+    get:
+      summary: List production batches (the roaster's queue)
+      description: Newest first. batchId is the id ordering sent, so a batch can be matched to its source.
+      responses:
+        "200":
+          description: All production batches
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [productionBatchId, batchId, beanName, roastLevel, status]
+                  properties:
+                    productionBatchId: { type: string }
+                    batchId: { type: string }
+                    beanName: { type: string }
+                    roastLevel: { type: string, enum: [light, medium, dark] }
+                    status: { type: string, enum: [Queued, Roasted, Packed] }
 
   /production-batches/{id}:
     parameters:
@@ -91,6 +110,11 @@ paths:
                 properties:
                   status: { type: string, enum: [Roasted] }
         "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: InvalidRoast
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "409":
           description: AlreadyRoasted
           content:
@@ -193,6 +217,11 @@ paths:
                 properties:
                   status: { type: string, enum: [Shipped] }
         "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: InvalidShipment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "409":
           description: NotReady
           content:

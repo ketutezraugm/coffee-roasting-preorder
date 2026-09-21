@@ -159,7 +159,9 @@ paths:
                 expired: { value: { error: OrderExpired, message: "Hold has expired" } }
                 paid: { value: { error: AlreadyPaid, message: "Order already paid with another reference" } }
         "422":
-          description: AmountMismatch
+          description: |
+            AmountMismatch, or InvalidPayment (missing paymentRef or amountIdr, or the
+            paymentRef was already used for a different order)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
