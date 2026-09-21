@@ -1,0 +1,14 @@
+{
+  "name": "scripts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "seed": "node seed.mjs",
+    "demo": "node demo.mjs",
+    "check-isolation": "node check-isolation.mjs",
+    "concurrency-test": "node concurrency-test.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.13.0"
+  }
+}
