@@ -1,0 +1,304 @@
+openapi: 3.0.3
+info:
+  title: ordering service
+  version: 1.0.0
+  description: |
+    Taking pre-orders. Owns batches, quota, orders and payments.
+    Weights are integers in grams. Money is integer IDR.
+    Errors always use {"error": "<Code>", "message": "<text>"}.
+servers:
+  - url: http://localhost:3001
+
+paths:
+  /health:
+    get:
+      summary: Liveness check
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /batches:
+    post:
+      summary: Roaster opens a pre-order batch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewBatch" }
+      responses:
+        "201":
+          description: Batch opened
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [batchId, status]
+                properties:
+                  batchId: { type: string }
+                  status: { type: string, enum: [Open] }
+        "422": { $ref: "#/components/responses/InvalidBatch" }
+    get:
+      summary: List batches
+      responses:
+        "200":
+          description: All batches
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Batch" }
+
+  /batches/{batchId}:
+    parameters:
+      - $ref: "#/components/parameters/batchId"
+    get:
+      summary: One batch
+      responses:
+        "200":
+          description: The batch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Batch" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /batches/{batchId}/orders:
+    parameters:
+      - $ref: "#/components/parameters/batchId"
+    post:
+      summary: Place an order and hold quota
+      description: |
+        The quota claim is atomic: two buyers ordering the last grams at the same
+        moment can never both succeed. The hold lasts a service-configured time;
+        see holdExpiresAt in the response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewOrder" }
+      responses:
+        "201":
+          description: Order placed, quota held
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orderId, totalGrams, amountIdr, holdExpiresAt]
+                properties:
+                  orderId: { type: string }
+                  totalGrams: { type: integer }
+                  amountIdr: { type: integer }
+                  holdExpiresAt: { type: string, format: date-time }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: QuotaExceeded or BatchNotOpen
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                quota: { value: { error: QuotaExceeded, message: "Not enough quota left" } }
+                closed: { value: { error: BatchNotOpen, message: "Batch is not open" } }
+        "422": { $ref: "#/components/responses/InvalidOrder" }
+
+  /orders/{orderId}:
+    parameters:
+      - $ref: "#/components/parameters/orderId"
+    get:
+      summary: One order
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /orders/{orderId}/payments:
+    parameters:
+      - $ref: "#/components/parameters/orderId"
+    post:
+      summary: Apply a payment (exactly once)
+      description: |
+        Repeating a paymentRef returns 200 with duplicate=true and changes nothing.
+        A different paymentRef for an already paid order returns 409 AlreadyPaid.
+        amountIdr must equal the amount stored on the order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paymentRef, amountIdr]
+              properties:
+                paymentRef: { type: string }
+                amountIdr: { type: integer }
+      responses:
+        "200":
+          description: Payment applied, or recognised as a duplicate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orderStatus, duplicate]
+                properties:
+                  orderStatus: { type: string, enum: [Paid] }
+                  duplicate: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: OrderExpired or AlreadyPaid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                expired: { value: { error: OrderExpired, message: "Hold has expired" } }
+                paid: { value: { error: AlreadyPaid, message: "Order already paid with another reference" } }
+        "422":
+          description: AmountMismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /batches/{batchId}/close:
+    parameters:
+      - $ref: "#/components/parameters/batchId"
+    post:
+      summary: Close the batch and send it to production
+      description: |
+        Closes the batch, expires remaining Held orders (releasing their grams) and
+        moves Paid orders to InProduction, then sends them to production.
+        Safe to call again: on an already closed batch it only re-sends what
+        production has not yet received. If production is down the batch stays
+        Closed and 502 is returned; call close again once production is back.
+      responses:
+        "200":
+          description: Closed and dispatched
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, dispatchedOrders]
+                properties:
+                  status: { type: string, enum: [Closed] }
+                  dispatchedOrders: { type: integer }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: NoPaidOrders
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: DownstreamUnavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /orders/{orderId}/complete:
+    parameters:
+      - $ref: "#/components/parameters/orderId"
+    post:
+      summary: Called by production when the buyer has received the order
+      description: Idempotent. Completing an already Completed order returns 200.
+      responses:
+        "200":
+          description: Order completed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [Completed] }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: NotInProduction
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  parameters:
+    batchId:
+      name: batchId
+      in: path
+      required: true
+      schema: { type: string }
+    orderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidBatch:
+      description: InvalidBatch
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidOrder:
+      description: InvalidOrder
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string }
+        message: { type: string }
+
+    NewBatch:
+      type: object
+      required: [beanName, roastLevel, quotaGrams, pricePerKgIdr, closesAt]
+      properties:
+        beanName: { type: string }
+        roastLevel: { type: string, enum: [light, medium, dark] }
+        quotaGrams: { type: integer, minimum: 1 }
+        pricePerKgIdr: { type: integer, minimum: 1 }
+        closesAt: { type: string, format: date-time }
+
+    Batch:
+      type: object
+      required: [batchId, beanName, roastLevel, status, quotaGrams, remainingGrams, pricePerKgIdr]
+      properties:
+        batchId: { type: string }
+        beanName: { type: string }
+        roastLevel: { type: string, enum: [light, medium, dark] }
+        status: { type: string, enum: [Open, Closed] }
+        quotaGrams: { type: integer }
+        remainingGrams: { type: integer }
+        pricePerKgIdr: { type: integer }
+
+    NewOrder:
+      type: object
+      required: [buyerName, buyerContact, shippingAddress, packSizeGrams, grind, quantity]
+      properties:
+        buyerName: { type: string }
+        buyerContact: { type: string }
+        shippingAddress: { type: string }
+        packSizeGrams: { type: integer, enum: [100, 250, 500, 1000] }
+        grind: { type: string, enum: [coarse, medium, fine] }
+        quantity: { type: integer, minimum: 1 }
+
+    Order:
+      type: object
+      required: [orderId, batchId, status, totalGrams, amountIdr, holdExpiresAt]
+      properties:
+        orderId: { type: string }
+        batchId: { type: string }
+        status: { type: string, enum: [Held, Paid, InProduction, Completed, Expired] }
+        totalGrams: { type: integer }
+        amountIdr: { type: integer }
+        holdExpiresAt: { type: string, format: date-time }
