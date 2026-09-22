@@ -14,15 +14,6 @@ CREATE TABLE lines (
   pack_size_grams     integer NOT NULL,
   grind               text NOT NULL,
   quantity            integer NOT NULL,
-  packed              boolean NOT NULL DEFAULT false
-);
-
-CREATE TABLE shipments (
-  order_id          text PRIMARY KEY,
-  recipient_name    text NOT NULL,
-  contact           text NOT NULL,
-  address           text NOT NULL,
-  status            text NOT NULL DEFAULT 'AwaitingPacking',
-  tracking_number   text,
-  ordering_notified boolean NOT NULL DEFAULT false
+  packed              boolean NOT NULL DEFAULT false,
+  ready_sent          boolean NOT NULL DEFAULT false   -- has fulfilment been told this line is ready?
 );

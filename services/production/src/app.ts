@@ -10,7 +10,7 @@ class HttpError extends Error {
 const notFound = (what: string) => new HttpError(404, "NotFound", `${what} not found`);
 
 const PACKS = [100, 250, 500, 1000];
-const GRINDS = ["coarse", "medium", "fine"];
+const GRINDS = ["wholeBean", "filter", "espresso"];
 const ROASTS = ["light", "medium", "dark"];
 const isStr = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
 const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
@@ -26,10 +26,8 @@ function parseBatch(b: any) {
     if (seen.has(l.orderId)) throw bad(`duplicate orderId ${l.orderId}`);
     seen.add(l.orderId);
     if (!PACKS.includes(l.packSizeGrams)) throw bad("packSizeGrams must be 100, 250, 500 or 1000");
-    if (!GRINDS.includes(l.grind)) throw bad("grind must be coarse, medium or fine");
+    if (!GRINDS.includes(l.grind)) throw bad("grind must be wholeBean, filter or espresso");
     if (!Number.isInteger(l.quantity) || l.quantity < 1) throw bad("quantity must be an integer >= 1");
-    if (!isStr(l.recipientName) || !isStr(l.contact) || !isStr(l.address))
-      throw bad("every line needs recipientName, contact and address");
   }
   return b;
 }
@@ -47,7 +45,7 @@ app.use(express.json());
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
-// Call 1: ordering sends a closed batch. Also creates one shipment per line.
+// Call 1: ordering sends a closed batch. No buyer or address data (that goes to fulfilment, call 2).
 app.post("/production-batches", async (req, res) => {
   const b = parseBatch(req.body);
   const existing = await findByBatchId(b.batchId);
@@ -63,10 +61,6 @@ app.post("/production-batches", async (req, res) => {
         await c.query(
           "INSERT INTO lines (production_batch_id, order_id, pack_size_grams, grind, quantity) VALUES ($1, $2, $3, $4, $5)",
           [id, l.orderId, l.packSizeGrams, l.grind, l.quantity],
-        );
-        await c.query(
-          "INSERT INTO shipments (order_id, recipient_name, contact, address) VALUES ($1, $2, $3, $4)",
-          [l.orderId, l.recipientName, l.contact, l.address],
         );
       }
       return { productionBatchId: id, status: r.rows[0].status };
@@ -141,7 +135,9 @@ app.get("/production-batches/:id/packing-list", async (req, res) => {
   res.json(lines.rows);
 });
 
-// Packing a line also makes its shipment ReadyToShip (same transaction).
+// Call 3: mark the line packed, then tell fulfilment it's ready to ship.
+// "Packed" (visible in AlreadyPacked) means both happened. If the fulfilment call fails after the
+// line is marked packed, ready_sent stays false, so calling pack again retries only the notification.
 app.post("/production-batches/:id/lines/:orderId/pack", async (req, res) => {
   const { id, orderId } = req.params;
   if (!isUuid(id)) throw notFound("production batch");
@@ -149,68 +145,29 @@ app.post("/production-batches/:id/lines/:orderId/pack", async (req, res) => {
     // Lock the batch row so two pack calls cannot both decide they were the last one.
     const b = await c.query("SELECT status FROM production_batches WHERE id = $1 FOR UPDATE", [id]);
     if (!b.rowCount) throw notFound("production batch");
-    const l = await c.query("SELECT packed FROM lines WHERE production_batch_id = $1 AND order_id = $2", [id, orderId]);
+    const l = await c.query("SELECT packed, ready_sent FROM lines WHERE production_batch_id = $1 AND order_id = $2", [id, orderId]);
     if (!l.rowCount) throw notFound("line");
     if (b.rows[0].status === "Queued") throw new HttpError(409, "NotRoasted", "Record the roast first");
-    if (l.rows[0].packed) throw new HttpError(409, "AlreadyPacked", "Line already packed");
-    await c.query("UPDATE lines SET packed = true WHERE production_batch_id = $1 AND order_id = $2", [id, orderId]);
-    await c.query("UPDATE shipments SET status = 'ReadyToShip' WHERE order_id = $1 AND status = 'AwaitingPacking'", [orderId]);
-    const left = await c.query("SELECT 1 FROM lines WHERE production_batch_id = $1 AND NOT packed LIMIT 1", [id]);
-    if (left.rowCount) return "Roasted";
-    await c.query("UPDATE production_batches SET status = 'Packed' WHERE id = $1", [id]);
-    return "Packed";
-  });
-  res.json({ lineStatus: "Packed", batchStatus });
-});
-
-app.get("/shipments/:orderId", async (req, res) => {
-  const r = await pool.query(
-    "SELECT status, tracking_number FROM shipments WHERE order_id = $1",
-    [req.params.orderId],
-  );
-  if (!r.rowCount) throw notFound("shipment");
-  const { status, tracking_number } = r.rows[0];
-  res.json({ status, ...(tracking_number && { trackingNumber: tracking_number }) });
-});
-
-app.post("/shipments/:orderId/ship", async (req, res) => {
-  const { orderId } = req.params;
-  const tracking = req.body?.trackingNumber;
-  if (!isStr(tracking)) throw new HttpError(422, "InvalidShipment", "trackingNumber is required");
-  const r = await pool.query(
-    "UPDATE shipments SET status = 'Shipped', tracking_number = $2 WHERE order_id = $1 AND status = 'ReadyToShip'",
-    [orderId, tracking],
-  );
-  if (!r.rowCount) {
-    const exists = await pool.query("SELECT 1 FROM shipments WHERE order_id = $1", [orderId]);
-    if (!exists.rowCount) throw notFound("shipment");
-    throw new HttpError(409, "NotReady", "Shipment is not ready to ship");
-  }
-  res.json({ status: "Shipped" });
-});
-
-// Call 2: mark Delivered, then tell ordering. If ordering is down the shipment stays
-// Delivered with ordering_notified = false, and calling this again re-sends the notice.
-app.post("/shipments/:orderId/confirm-receipt", async (req, res) => {
-  const { orderId } = req.params;
-  const s = await pool.query("SELECT status, ordering_notified FROM shipments WHERE order_id = $1", [orderId]);
-  if (!s.rowCount) throw notFound("shipment");
-  if (!["Shipped", "Delivered"].includes(s.rows[0].status))
-    throw new HttpError(409, "NotShipped", "Shipment has not been shipped yet");
-  await pool.query("UPDATE shipments SET status = 'Delivered' WHERE order_id = $1", [orderId]);
-  if (!s.rows[0].ordering_notified) {
-    try {
-      const r = await fetch(`${process.env.ORDERING_URL}/orders/${encodeURIComponent(orderId)}/complete`, {
-        method: "POST",
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!r.ok) throw new Error(`ordering answered ${r.status}`);
-    } catch (e: any) {
-      throw new HttpError(502, "DownstreamUnavailable", `Could not tell ordering: ${e.message}. Call again to retry.`);
+    if (l.rows[0].ready_sent) throw new HttpError(409, "AlreadyPacked", "Line already packed");
+    if (!l.rows[0].packed) {
+      await c.query("UPDATE lines SET packed = true WHERE production_batch_id = $1 AND order_id = $2", [id, orderId]);
+      const left = await c.query("SELECT 1 FROM lines WHERE production_batch_id = $1 AND NOT packed LIMIT 1", [id]);
+      if (!left.rowCount) await c.query("UPDATE production_batches SET status = 'Packed' WHERE id = $1", [id]);
     }
-    await pool.query("UPDATE shipments SET ordering_notified = true WHERE order_id = $1", [orderId]);
+    const stillOpen = await c.query("SELECT 1 FROM lines WHERE production_batch_id = $1 AND NOT packed LIMIT 1", [id]);
+    return stillOpen.rowCount ? "Roasted" : "Packed";
+  });
+  try {
+    const r = await fetch(`${process.env.FULFILMENT_URL}/shipments/${encodeURIComponent(orderId)}/ready`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) throw new Error(`fulfilment answered ${r.status}`);
+  } catch (e: any) {
+    throw new HttpError(502, "DownstreamUnavailable", `Could not tell fulfilment: ${e.message}. Call pack again to retry.`);
   }
-  res.json({ status: "Delivered" });
+  await pool.query("UPDATE lines SET ready_sent = true WHERE production_batch_id = $1 AND order_id = $2", [id, orderId]);
+  res.json({ lineStatus: "Packed", batchStatus });
 });
 
 const onError: ErrorRequestHandler = (err, _req, res, _next) => {
