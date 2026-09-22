@@ -11,7 +11,7 @@ class HttpError extends Error {
 const notFound = (what: string) => new HttpError(404, "NotFound", `${what} not found`);
 
 const PACKS = [100, 250, 500, 1000];
-const GRINDS = ["coarse", "medium", "fine"];
+const GRINDS = ["wholeBean", "filter", "espresso"];
 const ROASTS = ["light", "medium", "dark"];
 const HOLD_SECONDS = Number(process.env.HOLD_SECONDS ?? 43200);
 const isStr = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
@@ -69,7 +69,7 @@ app.post("/batches/:batchId/orders", async (req, res) => {
   if (!isStr(o?.buyerName) || !isStr(o.buyerContact) || !isStr(o.shippingAddress))
     throw bad("buyerName, buyerContact and shippingAddress are required");
   if (!PACKS.includes(o.packSizeGrams)) throw bad("packSizeGrams must be 100, 250, 500 or 1000");
-  if (!GRINDS.includes(o.grind)) throw bad("grind must be coarse, medium or fine");
+  if (!GRINDS.includes(o.grind)) throw bad("grind must be wholeBean, filter or espresso");
   if (!Number.isInteger(o.quantity) || o.quantity < 1) throw bad("quantity must be an integer >= 1");
   if (!isUuid(batchId)) throw notFound("batch");
 
@@ -168,8 +168,9 @@ app.post("/orders/:orderId/payments", async (req, res) => {
 // ---------- closing a batch ----------
 
 // Step 1 (transaction): Open -> Closed, expire held orders, Paid -> InProduction.
-// Step 2 (outside it): send the batch to production. If that fails the batch stays Closed and
-// undispatched, and calling close again only repeats step 2.
+// Step 2 (outside it): call 1 to production (batch-level, no address) and call 2 to fulfilment
+// (per order, with address). Both are attempted independently and best-effort, each tracked by
+// its own idempotent flag, so a failure in one never blocks a retry of the other.
 app.post("/batches/:batchId/close", async (req, res) => {
   const { batchId } = req.params;
   if (!isUuid(batchId)) throw notFound("batch");
@@ -184,38 +185,59 @@ app.post("/batches/:batchId/close", async (req, res) => {
       await c.query("UPDATE orders SET status = 'InProduction' WHERE batch_id = $1 AND status = 'Paid'", [batchId]);
       await c.query("UPDATE batches SET status = 'Closed' WHERE id = $1", [batchId]);
     }
-    const r = await c.query(
-      `SELECT bean_name, roast_level, dispatched FROM batches WHERE id = $1`,
-      [batchId],
-    );
+    const r = await c.query(`SELECT bean_name, roast_level, dispatched FROM batches WHERE id = $1`, [batchId]);
     return r.rows[0];
   });
 
-  const lines = await pool.query(
-    `SELECT id AS "orderId", pack_size_grams AS "packSizeGrams", grind, quantity,
-            buyer_name AS "recipientName", buyer_contact AS contact, shipping_address AS address
+  const dispatched = await pool.query(
+    `SELECT id AS "orderId", pack_size_grams AS "packSizeGrams", grind, quantity
        FROM orders WHERE batch_id = $1 AND status IN ('InProduction', 'Completed') ORDER BY created_at`,
     [batchId],
   );
 
+  let productionFailed = false;
   if (!batch.dispatched) {
     try {
       const r = await fetch(`${process.env.PRODUCTION_URL}/production-batches`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ batchId, beanName: batch.bean_name, roastLevel: batch.roast_level, lines: lines.rows }),
+        body: JSON.stringify({ batchId, beanName: batch.bean_name, roastLevel: batch.roast_level, lines: dispatched.rows }),
         signal: AbortSignal.timeout(5000),
       });
       if (!r.ok) throw new Error(`production answered ${r.status}`);
-    } catch (e: any) {
-      throw new HttpError(502, "DownstreamUnavailable", `Could not send the batch to production: ${e.message}. Call close again to retry.`);
+      await pool.query("UPDATE batches SET dispatched = true WHERE id = $1", [batchId]);
+    } catch {
+      productionFailed = true;
     }
-    await pool.query("UPDATE batches SET dispatched = true WHERE id = $1", [batchId]);
   }
-  res.json({ status: "Closed", dispatchedOrders: lines.rowCount });
+
+  const unsent = await pool.query(
+    `SELECT id AS "orderId", buyer_name AS "recipientName", buyer_contact AS contact, shipping_address AS address
+       FROM orders WHERE batch_id = $1 AND status IN ('InProduction', 'Completed') AND shipment_sent = false`,
+    [batchId],
+  );
+  let fulfilmentFailed = false;
+  for (const o of unsent.rows) {
+    try {
+      const r = await fetch(`${process.env.FULFILMENT_URL}/shipments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(o),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) throw new Error(`fulfilment answered ${r.status}`);
+      await pool.query("UPDATE orders SET shipment_sent = true WHERE id = $1", [o.orderId]);
+    } catch {
+      fulfilmentFailed = true;
+    }
+  }
+
+  if (productionFailed || fulfilmentFailed)
+    throw new HttpError(502, "DownstreamUnavailable", "Could not reach production and/or fulfilment for every order. Call close again to retry.");
+  res.json({ status: "Closed", dispatchedOrders: dispatched.rowCount });
 });
 
-// Called by production when the buyer confirmed receipt. Idempotent.
+// Call 4: called by fulfilment when the buyer confirmed receipt. Idempotent.
 app.post("/orders/:orderId/complete", async (req, res) => {
   const { orderId } = req.params;
   if (!isUuid(orderId)) throw notFound("order");

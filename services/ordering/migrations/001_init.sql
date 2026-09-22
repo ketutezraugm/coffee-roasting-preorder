@@ -25,7 +25,8 @@ CREATE TABLE orders (
   amount_idr       integer NOT NULL,   -- fixed at order time, later price changes never touch it
   status           text NOT NULL DEFAULT 'Held',
   hold_expires_at  timestamptz NOT NULL,
-  created_at       timestamptz NOT NULL DEFAULT now()
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  shipment_sent    boolean NOT NULL DEFAULT false   -- has fulfilment been told to create this order's shipment?
 );
 
 CREATE INDEX orders_held_expiry ON orders (hold_expires_at) WHERE status = 'Held';

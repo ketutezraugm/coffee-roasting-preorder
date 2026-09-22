@@ -6,7 +6,8 @@ Owner: [name]. Reviewer: [name].
 ## Run
 
 Needs Node.js 20+ and the `ordering_db` database from [../../infra/init.sql](../../infra/init.sql).
-Start `production` first; `ordering` still starts without it, but `close` will answer 502 until it is up.
+Start `fulfilment` and `production` first (see the repo README's start order); `ordering` still starts
+without them, but `close` will answer 502 until both are up.
 
 ```
 cp .env.example .env
@@ -22,7 +23,8 @@ Migrations in `migrations/*.sql` are applied at startup.
 |---|---|---|
 | `PORT` | `3001` | Port to listen on |
 | `DATABASE_URL` | `postgres://ordering_user:ordering_pw@localhost:5432/ordering_db` | This service's own database and role |
-| `PRODUCTION_URL` | `http://localhost:3002` | Where closed batches are sent |
+| `PRODUCTION_URL` | `http://localhost:3002` | Where closed batches are sent (call 1) |
+| `FULFILMENT_URL` | `http://localhost:3003` | Where each paid order's shipment is created (call 2) |
 | `HOLD_SECONDS` | `43200` | How long an unpaid order holds its quota (12 h: buyers pay by manual bank transfer). Use `20` for the demo. |
 | `SWEEP_INTERVAL_SECONDS` | `5` | How often overdue holds are expired |
 
@@ -46,5 +48,9 @@ Demo mode: `HOLD_SECONDS=20 npm start` (PowerShell: `$env:HOLD_SECONDS=20; npm s
 
 - The sweeper and `close` both expire `Held` orders and give the grams back in one SQL statement.
 - Payment only succeeds while `hold_expires_at >= now()`, and the sweeper only expires `hold_expires_at < now()`, so they cannot race.
-- `close` commits the state change first, then sends the batch to `production`. If `production` is down it returns 502, the batch stays
-  `Closed`, and calling `close` again re-sends it. This partial state is visible and expected: there is no broker or automatic retry.
+- `close` commits the state change first, then makes two kinds of downstream call, each tracked by its own
+  idempotent flag so one failing never blocks a retry of the other: call 1 to `production` (batch-level,
+  `batches.dispatched`) and call 2 to `fulfilment` (per order, `orders.shipment_sent`, with the buyer's
+  address — `production` never sees it). If either is down, `close` returns 502 and the batch stays
+  `Closed`; calling `close` again retries only what has not yet succeeded. This partial state is visible
+  and expected: there is no broker or automatic retry.
