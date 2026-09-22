@@ -61,7 +61,7 @@ If the team picks a different language or database, keep every rule in this file
 
 > **Decide before Phase 1: two services or three?** The handout says start coarse, because splitting later is easy and merging back is not. Two services (`ordering`, plus a merged `production` that also ships) satisfy B1 and the "crossing at least two bounded contexts" requirement, and are noticeably less work in three weeks. Three give richer material for the report. If the team is unsure, build two and keep shipping as a module. Every rule below applies either way; if you merge, drop `fulfilment` from the tables and treat calls 2, 3 and 4 as in-process.
 >
-> **Decision (2026-09-22): two services.** `ordering` and `production`. Shipping lives inside `production` as a module, so calls 2, 3 and 4 become in-process or disappear. Consequence: `production` now receives recipient name, contact and address (in call 1) because it owns shipping. `infra/init.sql` has no `fulfilment` role or database. Contracts in Phase 1 follow this. Names stay provisional until the glossary is done.
+> **Decision (2026-09-22): two services, then reversed.** Built as `ordering` + `production` (shipping merged in) for schedule reasons. The team's event storming and bounded-context analysis (Step 2) then found **three** separate contexts — Ordering (which folds payment into its `Order` aggregate, not a fourth "Payment" service), Production, Fulfilment — with separate aggregates, separate identity schemes, and a cohesion check that routes their changes independently. That matches this table below, not the two-service merge, so the build reverts to three services: `ordering`, `production`, `fulfilment`. See `docs/coupling.md`'s design log for the full before/after.
 >
 > **Service names must come from the glossary** (Step 2). If the domain expert calls these areas something else, rename the services and the contracts to match before Phase 1. Names taken from layers or tables lose 5 marks.
 
@@ -119,7 +119,7 @@ Weights are integers in **grams**. Money is integer IDR.
 | `POST /batches/{batchId}/close` | Close the batch and send it to production | `200 {status:"Closed", dispatchedOrders:n}` (safe to call again, it re-sends idempotently) | `409 NoPaidOrders`, `502 DownstreamUnavailable` |
 | `POST /orders/{orderId}/complete` | Called by `fulfilment` on delivery | `200 {status:"Completed"}` (idempotent) | `409 NotInProduction`, `404` |
 
-Allowed values: `packSizeGrams` ∈ {100, 250, 500, 1000}; `grind` ∈ {coarse, medium, fine}; `roastLevel` ∈ {light, medium, dark}; `quantity` ≥ 1.
+Allowed values: `packSizeGrams` ∈ {100, 250, 500, 1000}; `grind` ∈ {wholeBean, filter, espresso} (per the domain glossary, superseding this file's earlier coarse/medium/fine placeholder); `roastLevel` ∈ {light, medium, dark}; `quantity` ≥ 1.
 `totalGrams = packSizeGrams × quantity`. `amountIdr = round(totalGrams × pricePerKgIdr / 1000)`, computed by `ordering` and stored on the order, so a later price change never alters an existing order's amount. Payment must match the stored amount exactly.
 Order states: `Held → Paid → InProduction → Completed`, and `Held → Expired`.
 Batch states: `Open → Closed`.
