@@ -18,12 +18,13 @@ clients move to a new version path (`/v2/batches`) while `/batches` stays until 
 
 | Service | Change |
 |---|---|
-| ordering | New `Cancelled` state, a refund record, release the quota, and call production if the order is already in production. |
-| production | New endpoint to remove a line (or mark it cancelled) and cancel its shipment, refused once shipped. |
+| ordering | New `Cancelled` state, a refund record, release the quota, and call production and fulfilment if the order was already dispatched. |
+| production | New endpoint to remove a line (or mark it cancelled), refused once packed. |
+| fulfilment | New endpoint to cancel a shipment, refused once shipped. |
 
-**Release together?** No, but there is an order: production first (new endpoint, additive), then ordering (starts calling it).
-If ordering goes first, cancelling an order already in production fails with 404, so it must only cancel
-orders that have not been dispatched until production has the endpoint.
+**Release together?** No, but there is an order: production and fulfilment first (new endpoints, additive),
+then ordering (starts calling them). If ordering goes first, cancelling an already-dispatched order fails
+with 404, so it must only cancel orders that were never dispatched until the other two have the endpoints.
 
 ## 3. Add a second roaster
 

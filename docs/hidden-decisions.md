@@ -10,17 +10,25 @@ Report question: which internal change would break my consumers, and what stops 
 | How quota is counted (a `claimed_grams` counter on the batch, updated atomically) | `remainingGrams` is the only exposed number. We could switch to summing orders without changing the contract. |
 | How hold expiry works (background sweeper, its interval, the hold length) | Consumers only see `Expired` and `holdExpiresAt`. |
 | Id scheme for `batchId` and `orderId` | Ids are opaque strings. Nobody may parse them. |
-| Dispatch bookkeeping for `close` (which batches production has already received) | Only `Closed` and `dispatchedOrders` are visible. |
+| Which of the two downstream calls on `close` (to production, to fulfilment per order) still need retrying | Only `Closed` and `dispatchedOrders` are visible. |
 
 ## production
 
 | Hidden decision | Why consumers must not see it |
 |---|---|
-| Database engine and table shape (production batches, lines, shipments) | Ordering only calls `POST /production-batches` and never queries our data. |
-| Internal state names beyond the ones in the contract (for example how "Delivered but ordering not yet told" is stored) | Consumers see `Delivered`, and a retry works whatever the storage. |
-| That shipping is a module inside production, not its own service | We can split it out later. Callers of `/shipments/...` are the roaster and buyer, not ordering. |
+| Database engine and table shape (production batches, lines) | Ordering only calls `POST /production-batches` and never queries our data. |
+| Internal state names beyond the ones in the contract | Consumers see `Queued`/`Roasted`/`Packed`, whatever the storage. |
+| That packing tells fulfilment over HTTP (call 3), not a shared table | Fulfilment sees only `POST /shipments/{orderId}/ready`. |
 | Id scheme for `productionBatchId` | Opaque string. |
-| How the pack step updates the shipment (same transaction) | Callers see one `pack` call, not two steps. |
+
+## fulfilment
+
+| Hidden decision | Why consumers must not see it |
+|---|---|
+| Database engine and table shape (shipments) | Ordering and production only call the endpoints in the contract. |
+| Internal state names beyond `AwaitingPacking`/`ReadyToShip`/`Shipped`/`Delivered` | Nothing else is exposed. |
+| Id scheme for `shipmentId` | The public key for status lookups is `orderId`, not `shipmentId`. |
+| Whether ordering was already told about a delivery (so confirm-receipt can be retried) | Callers only see `Delivered` and a possible 502. |
 
 ## What stops a breaking change
 
