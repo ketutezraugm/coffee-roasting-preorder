@@ -1,6 +1,7 @@
 // Plumbing for the scripts only. Talks to the services over HTTP, following the contracts. No SQL here.
 export const ORDERING = process.env.ORDERING_URL ?? "http://localhost:3001";
 export const PRODUCTION = process.env.PRODUCTION_URL ?? "http://localhost:3002";
+export const FULFILMENT = process.env.FULFILMENT_URL ?? "http://localhost:3003";
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,6 +45,6 @@ export const placeOrder = (batchId, packSizeGrams = 1000, buyerName = "Buyer") =
     buyerContact: `${buyerName.toLowerCase()}@example.com`,
     shippingAddress: "Jl. Contoh No. 1, Jakarta",
     packSizeGrams,
-    grind: "medium",
+    grind: "filter",
     quantity: 1,
   });

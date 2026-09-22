@@ -7,6 +7,7 @@ const host = process.env.PGHOST ?? "localhost", port = process.env.PGPORT ?? 543
 const services = {
   ordering: { user: "ordering_user", password: "ordering_pw", db: "ordering_db" },
   production: { user: "production_user", password: "production_pw", db: "production_db" },
+  fulfilment: { user: "fulfilment_user", password: "fulfilment_pw", db: "fulfilment_db" },
 };
 
 // Returns "connected" or the Postgres error code (42501 = permission denied).

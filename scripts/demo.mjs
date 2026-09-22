@@ -1,8 +1,9 @@
-// Runs the demo scenario (BUILD_SPEC section 10) against the running services.
+// Runs the demo scenario (BUILD_SPEC section 10) against the running services
+// (fulfilment, production, ordering — start in that order).
 // Start ordering with HOLD_SECONDS=20 so step 5 finishes quickly.
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { ORDERING, PRODUCTION, call, checker, placeOrder, seedBatch, sleep } from "./lib.mjs";
+import { ORDERING, PRODUCTION, FULFILMENT, call, checker, placeOrder, seedBatch, sleep } from "./lib.mjs";
 
 const { check, done } = checker();
 // Payment refs are unique per run, so the demo can be run again against the same database.
@@ -59,11 +60,11 @@ const lateOrder = r.body;
 
 console.log("\n6. Close the batch (orders 1 and 2 are paid, the new order is still held)");
 r = await call("POST", `${ORDERING}/batches/${batchId}/close`);
-check("batch closed, 2 orders sent to production", r.status === 200 && r.body.dispatchedOrders === 2, r);
+check("batch closed, 2 orders sent to production and fulfilment", r.status === 200 && r.body.dispatchedOrders === 2, r);
 check("unpaid order expired by the close", (await order(lateOrder.orderId)).status === "Expired");
 check("paid orders are InProduction", (await order(orders[0].orderId)).status === "InProduction" && (await order(orders[1].orderId)).status === "InProduction");
 
-console.log("\n7. Production: roast, read the packing list, pack each order");
+console.log("\n7. Production: roast, read the packing list, pack each order (which tells fulfilment)");
 r = await call("GET", `${PRODUCTION}/production-batches`);
 const pb = r.body?.find((b) => b.batchId === batchId);
 if (!check("production has the batch", !!pb, r)) process.exit(1);
@@ -78,14 +79,16 @@ for (const o of orders.slice(0, 2)) {
 r = await call("GET", `${PRODUCTION}/production-batches/${pb.productionBatchId}`);
 check("production batch is Packed", r.body?.status === "Packed", r);
 
-console.log("\n8. Shipping: ship each order with a tracking number, then confirm receipt");
+console.log("\n8. Fulfilment: ship each order with a tracking number, then confirm receipt");
 for (const [i, o] of orders.slice(0, 2).entries()) {
-  r = await call("POST", `${PRODUCTION}/shipments/${o.orderId}/ship`, { trackingNumber: `TRK-DEMO-${i + 1}` });
+  r = await call("GET", `${FULFILMENT}/shipments/${o.orderId}`);
+  check(`shipment ${o.orderId.slice(0, 8)} is ReadyToShip`, r.status === 200 && r.body.status === "ReadyToShip", r);
+  r = await call("POST", `${FULFILMENT}/shipments/${o.orderId}/ship`, { trackingNumber: `TRK-DEMO-${i + 1}` });
   check(`shipped ${o.orderId.slice(0, 8)}`, r.status === 200 && r.body.status === "Shipped", r);
-  r = await call("POST", `${PRODUCTION}/shipments/${o.orderId}/confirm-receipt`);
+  r = await call("POST", `${FULFILMENT}/shipments/${o.orderId}/confirm-receipt`);
   check(`receipt confirmed ${o.orderId.slice(0, 8)}`, r.status === 200 && r.body.status === "Delivered", r);
 }
-r = await call("GET", `${PRODUCTION}/shipments/${orders[0].orderId}`);
+r = await call("GET", `${FULFILMENT}/shipments/${orders[0].orderId}`);
 console.log(`      GET /shipments/${orders[0].orderId.slice(0, 8)}... -> ${JSON.stringify(r.body)}`);
 
 console.log("\n9. Ordering shows the orders Completed");
