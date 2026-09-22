@@ -1,0 +1,194 @@
+openapi: 3.0.3
+info:
+  title: fulfilment service
+  version: 1.0.0
+  description: |
+    Delivering. Owns shipments: recipient details, tracking number, delivery state.
+    Errors always use {"error": "<Code>", "message": "<text>"}.
+servers:
+  - url: http://localhost:3003
+
+paths:
+  /health:
+    get:
+      summary: Liveness check
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /shipments:
+    post:
+      summary: Create a shipment (call 2, from ordering)
+      description: Sending the same orderId again returns 200 with the existing shipment and changes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, recipientName, contact, address]
+              properties:
+                orderId: { type: string }
+                recipientName: { type: string }
+                contact: { type: string }
+                address: { type: string }
+      responses:
+        "201":
+          description: AwaitingPacking
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShipmentCreated" }
+        "200":
+          description: Already created, existing shipment returned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShipmentCreated" }
+        "422":
+          description: InvalidShipment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /shipments/{orderId}:
+    parameters:
+      - $ref: "#/components/parameters/orderId"
+    get:
+      summary: Shipment status
+      responses:
+        "200":
+          description: The shipment
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { $ref: "#/components/schemas/ShipmentStatus" }
+                  trackingNumber: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /shipments/{orderId}/ready:
+    parameters:
+      - $ref: "#/components/parameters/orderId"
+    post:
+      summary: Called by production once an order is packed (call 3)
+      description: Idempotent. Calling this on an order already ReadyToShip or later returns 200 and changes nothing.
+      responses:
+        "200":
+          description: ReadyToShip
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ReadyToShip] }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /shipments/{orderId}/ship:
+    parameters:
+      - $ref: "#/components/parameters/orderId"
+    post:
+      summary: Roaster ships the order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trackingNumber]
+              properties:
+                trackingNumber: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: Shipped
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [Shipped] }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: InvalidShipment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: NotReady
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /shipments/{orderId}/confirm-receipt:
+    parameters:
+      - $ref: "#/components/parameters/orderId"
+    post:
+      summary: Buyer confirms receipt
+      description: |
+        Marks the shipment Delivered, then tells ordering to complete the order (call 4).
+        If ordering is down the shipment stays Delivered and 502 is returned;
+        calling again re-sends the notification (ordering's complete is idempotent).
+      responses:
+        "200":
+          description: Delivered and ordering notified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [Delivered] }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: NotShipped
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: DownstreamUnavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  parameters:
+    orderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string }
+        message: { type: string }
+
+    ShipmentStatus:
+      type: string
+      enum: [AwaitingPacking, ReadyToShip, Shipped, Delivered]
+
+    ShipmentCreated:
+      type: object
+      required: [shipmentId, status]
+      properties:
+        shipmentId: { type: string }
+        status: { $ref: "#/components/schemas/ShipmentStatus" }

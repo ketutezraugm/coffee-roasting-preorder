@@ -3,7 +3,7 @@ info:
   title: production service
   version: 1.0.0
   description: |
-    Roasting, packing and shipping. Owns production batches, packing lines and shipments.
+    Roasting and packing. Owns production batches and their packing lines.
     Weights are integers in grams.
     Errors always use {"error": "<Code>", "message": "<text>"}.
 servers:
@@ -28,9 +28,8 @@ paths:
     post:
       summary: Receive a closed batch from ordering
       description: |
-        Also creates one shipment per line (state AwaitingPacking) from the recipient
-        details. Sending the same batchId again returns 200 with the existing
-        production batch and changes nothing.
+        Sending the same batchId again returns 200 with the existing production
+        batch and changes nothing.
       requestBody:
         required: true
         content:
@@ -139,7 +138,7 @@ paths:
                   properties:
                     orderId: { type: string }
                     packSizeGrams: { type: integer }
-                    grind: { type: string, enum: [coarse, medium, fine] }
+                    grind: { type: string, enum: [wholeBean, filter, espresso] }
                     quantity: { type: integer }
                     packed: { type: boolean }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -151,8 +150,8 @@ paths:
     post:
       summary: Mark one order packed
       description: |
-        Also moves that order's shipment to ReadyToShip. The batch becomes Packed
-        when all lines are packed.
+        Also tells fulfilment the order is ready to ship (call 3). Safe to call again if
+        that returns 502; once fulfilment has confirmed, calling it again returns 409 AlreadyPacked.
       responses:
         "200":
           description: Packed
@@ -173,86 +172,6 @@ paths:
               examples:
                 notRoasted: { value: { error: NotRoasted, message: "Record the roast first" } }
                 packed: { value: { error: AlreadyPacked, message: "Line already packed" } }
-
-  /shipments/{orderId}:
-    parameters:
-      - $ref: "#/components/parameters/orderId"
-    get:
-      summary: Shipment status
-      responses:
-        "200":
-          description: The shipment
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status: { $ref: "#/components/schemas/ShipmentStatus" }
-                  trackingNumber: { type: string }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /shipments/{orderId}/ship:
-    parameters:
-      - $ref: "#/components/parameters/orderId"
-    post:
-      summary: Roaster ships the order
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [trackingNumber]
-              properties:
-                trackingNumber: { type: string, minLength: 1 }
-      responses:
-        "200":
-          description: Shipped
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status: { type: string, enum: [Shipped] }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "422":
-          description: InvalidShipment
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "409":
-          description: NotReady
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
-  /shipments/{orderId}/confirm-receipt:
-    parameters:
-      - $ref: "#/components/parameters/orderId"
-    post:
-      summary: Buyer confirms receipt
-      description: |
-        Marks the shipment Delivered, then tells ordering to complete the order.
-        If ordering is down the shipment stays Delivered and 502 is returned;
-        calling again re-sends the notification (ordering's complete is idempotent).
-      responses:
-        "200":
-          description: Delivered and ordering notified
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status: { type: string, enum: [Delivered] }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409":
-          description: NotShipped
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
         "502":
           description: DownstreamUnavailable
           content:
@@ -287,28 +206,14 @@ components:
         error: { type: string }
         message: { type: string }
 
-    ShipmentStatus:
-      type: string
-      enum: [AwaitingPacking, ReadyToShip, Shipped, Delivered]
-
     Line:
       type: object
       required: [orderId, packSizeGrams, grind, quantity]
       properties:
         orderId: { type: string }
         packSizeGrams: { type: integer, enum: [100, 250, 500, 1000] }
-        grind: { type: string, enum: [coarse, medium, fine] }
+        grind: { type: string, enum: [wholeBean, filter, espresso] }
         quantity: { type: integer, minimum: 1 }
-
-    NewLine:
-      allOf:
-        - $ref: "#/components/schemas/Line"
-        - type: object
-          required: [recipientName, contact, address]
-          properties:
-            recipientName: { type: string }
-            contact: { type: string }
-            address: { type: string }
 
     NewProductionBatch:
       type: object
@@ -320,7 +225,7 @@ components:
         lines:
           type: array
           minItems: 1
-          items: { $ref: "#/components/schemas/NewLine" }
+          items: { $ref: "#/components/schemas/Line" }
 
     ProductionBatchCreated:
       type: object

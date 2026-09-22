@@ -170,13 +170,15 @@ paths:
     parameters:
       - $ref: "#/components/parameters/batchId"
     post:
-      summary: Close the batch and send it to production
+      summary: Close the batch, send it to production and fulfilment
       description: |
         Closes the batch, expires remaining Held orders (releasing their grams) and
-        moves Paid orders to InProduction, then sends them to production.
-        Safe to call again: on an already closed batch it only re-sends what
-        production has not yet received. If production is down the batch stays
-        Closed and 502 is returned; call close again once production is back.
+        moves Paid orders to InProduction. Then sends the whole batch to production
+        (call 1, no address) and creates a shipment per paid order in fulfilment
+        (call 2, with the buyer's address; production never sees it).
+        Safe to call again: it only re-sends whichever of those two calls have not
+        yet succeeded, per order. If either downstream service is down the batch
+        stays Closed and 502 is returned; call close again once it is back.
       responses:
         "200":
           description: Closed and dispatched
@@ -204,7 +206,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/orderId"
     post:
-      summary: Called by production when the buyer has received the order
+      summary: Called by fulfilment when the buyer has received the order
       description: Idempotent. Completing an already Completed order returns 200.
       responses:
         "200":
@@ -291,7 +293,7 @@ components:
         buyerContact: { type: string }
         shippingAddress: { type: string }
         packSizeGrams: { type: integer, enum: [100, 250, 500, 1000] }
-        grind: { type: string, enum: [coarse, medium, fine] }
+        grind: { type: string, enum: [wholeBean, filter, espresso] }
         quantity: { type: integer, minimum: 1 }
 
     Order:

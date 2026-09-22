@@ -4,6 +4,7 @@ One OpenAPI 3 file per service. These are the only thing services may depend on.
 
 - [ordering.openapi.yaml](ordering.openapi.yaml)
 - [production.openapi.yaml](production.openapi.yaml)
+- [fulfilment.openapi.yaml](fulfilment.openapi.yaml)
 
 ## Conventions
 
@@ -20,7 +21,9 @@ One OpenAPI 3 file per service. These are the only thing services may depend on.
 
 ## Who calls whom
 
-| Caller | Callee | Endpoint |
-|---|---|---|
-| ordering | production | `POST /production-batches` |
-| production | ordering | `POST /orders/{orderId}/complete` |
+| # | Caller | Callee | Endpoint |
+|---|---|---|---|
+| 1 | ordering | production | `POST /production-batches` |
+| 2 | ordering | fulfilment | `POST /shipments` |
+| 3 | production | fulfilment | `POST /shipments/{orderId}/ready` |
+| 4 | fulfilment | ordering | `POST /orders/{orderId}/complete` |
